@@ -1,23 +1,59 @@
+# ============================================================
+# JARVIS v0.6
+# Gemini 3.8 Flash + Windows Control
+# Classroom TEXT MODE
+# ============================================================
+
 import os
-import sys
+import re
+import time
+import webbrowser
 import subprocess
 import datetime
-import webbrowser
+from pathlib import Path
 
-import ollama
-import speech_recognition as sr
-import pyttsx3
+import psutil
+
+from google import genai
+from google.genai import types
 
 
 # ============================================================
-# J.A.R.V.I.S. v0.3
-# Local AI PC Assistant
+# CONFIGURATION
 # ============================================================
 
-MODEL = "qwen3:4b"
+MODEL = "gemini-3.8-flash"
 
-# Your working microphone
-MIC_ID = 1
+THINKING_LEVEL = "low"
+
+MAX_RETRIES = 3
+
+APP_NAME = "JARVIS"
+
+
+# ============================================================
+# API KEY
+# ============================================================
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not API_KEY:
+    print()
+    print("ERROR: GEMINI_API_KEY is not set.")
+    print()
+    print('Run:')
+    print('$env:GEMINI_API_KEY="YOUR_KEY"')
+    print()
+    raise SystemExit(1)
+
+
+# ============================================================
+# GEMINI CLIENT
+# ============================================================
+
+client = genai.Client(
+    api_key=API_KEY
+)
 
 
 # ============================================================
@@ -25,397 +61,630 @@ MIC_ID = 1
 # ============================================================
 
 SYSTEM_PROMPT = """
-You are JARVIS, a personal AI assistant running locally on a Windows PC.
+You are JARVIS, a personal AI assistant running on a Windows PC.
 
-Personality:
-- Calm
+Your personality:
 - Intelligent
-- Professional
-- Friendly
-- Slightly futuristic
+- Calm
 - Helpful
-- Concise
+- Slightly futuristic
+- Friendly
+- Direct
+- Concise when appropriate
 
-Always identify yourself as JARVIS.
-Never say that you are Qwen.
+You are the reasoning layer of a computer assistant.
 
-You are connected to a Windows PC.
+Important rules:
 
-IMPORTANT:
-Do not claim that you opened an application, changed a setting,
-sent a message, deleted a file, or performed any computer action
-unless the Python program actually performed that action.
+1. Answer the user's questions naturally.
 
-Keep normal answers short because your responses are spoken aloud.
+2. Do not pretend you performed a computer action unless the
+   local JARVIS program actually performed that action.
+
+3. Never claim to have opened an application, deleted a file,
+   sent a message, changed a setting, or controlled Windows
+   unless the local program confirmed it.
+
+4. For simple questions, keep answers short.
+
+5. For technical questions, explain clearly.
+
+6. When asked for programming help, provide working code.
+
+7. If the user asks a complicated question, reason carefully.
+
+8. The user may interact with you through voice later, so avoid
+   unnecessarily long responses.
+
+9. You are JARVIS, not a generic chatbot.
 """
 
 
 # ============================================================
-# TEXT TO SPEECH
+# GEMINI CONFIG
 # ============================================================
 
-engine = pyttsx3.init()
+GEMINI_CONFIG = types.GenerateContentConfig(
 
-engine.setProperty("rate", 175)
-engine.setProperty("volume", 1.0)
+    system_instruction=SYSTEM_PROMPT,
 
+    thinking_config=types.ThinkingConfig(
+        thinking_level=THINKING_LEVEL
+    ),
 
-def speak(text):
-    print(f"\nJARVIS: {text}")
-
-    try:
-        engine.say(text)
-        engine.runAndWait()
-    except Exception as e:
-        print("TTS error:", e)
+    max_output_tokens=500,
+)
 
 
 # ============================================================
-# SPEECH RECOGNITION
+# CONVERSATION MEMORY
 # ============================================================
 
-recognizer = sr.Recognizer()
-
-recognizer.energy_threshold = 300
-recognizer.dynamic_energy_threshold = True
-recognizer.pause_threshold = 0.8
-recognizer.non_speaking_duration = 0.5
+conversation_history = []
 
 
-# ============================================================
-# MICROPHONE CALIBRATION
-# ============================================================
+def build_prompt(user_message):
 
-def initialize_microphone():
+    # Keep a lightweight local history.
+    # This avoids an ever-growing request.
 
-    try:
+    recent_history = conversation_history[-10:]
 
-        microphone = sr.Microphone(device_index=MIC_ID)
+    history_text = ""
 
-        print(f"Microphone selected: ID {MIC_ID}")
-        print("Calibrating microphone...")
+    if recent_history:
 
-        with microphone as source:
+        history_text = "\n\nPrevious conversation:\n"
 
-            recognizer.adjust_for_ambient_noise(
-                source,
-                duration=2
+        for role, message in recent_history:
+
+            history_text += (
+                f"{role}: {message}\n"
             )
 
-        print("Microphone ready.")
-
-        return microphone
-
-    except Exception as e:
-
-        print("Microphone initialization error:", e)
-
-        return None
+    return (
+        history_text
+        + "\n\nCurrent user message:\n"
+        + user_message
+    )
 
 
 # ============================================================
-# LISTEN
+# GEMINI REQUEST
 # ============================================================
 
-def listen(microphone):
+def ask_gemini(question):
 
-    if microphone is None:
-        return None
+    prompt = build_prompt(question)
 
-    try:
+    for attempt in range(1, MAX_RETRIES + 1):
 
-        print("\nListening...")
+        try:
 
-        with microphone as source:
+            print()
+            print("☁️  Gemini is thinking...")
 
-            audio = recognizer.listen(
-                source,
-                timeout=10,
-                phrase_time_limit=10
+            response = client.models.generate_content(
+
+                model=MODEL,
+
+                contents=prompt,
+
+                config=GEMINI_CONFIG,
             )
 
-        print("Processing...")
+            answer = response.text
 
-        text = recognizer.recognize_google(audio)
+            if not answer:
 
-        text = text.lower().strip()
+                return "I didn't receive a response."
 
-        print(f"You: {text}")
+            answer = answer.strip()
 
-        return text
+            conversation_history.append(
+                ("User", question)
+            )
 
-    except sr.WaitTimeoutError:
+            conversation_history.append(
+                ("JARVIS", answer)
+            )
 
-        # No speech detected.
-        # Stay silent instead of repeatedly saying
-        # "I couldn't understand that."
+            return answer
 
-        return None
+        except Exception as error:
 
-    except sr.UnknownValueError:
+            error_text = str(error)
 
-        # Audio was detected but speech wasn't understood.
-        return None
+            print()
+            print(
+                f"Gemini attempt "
+                f"{attempt}/{MAX_RETRIES} failed."
+            )
 
-    except sr.RequestError:
+            print(error_text)
 
-        speak(
-            "The speech recognition service is unavailable."
+            # Retry temporary errors only.
+            temporary = (
+
+                "503" in error_text
+
+                or "UNAVAILABLE" in error_text
+
+                or "high demand" in error_text
+
+                or "429" in error_text
+
+                or "RESOURCE_EXHAUSTED" in error_text
+
+                or "500" in error_text
+
+            )
+
+            if temporary and attempt < MAX_RETRIES:
+
+                wait_time = 2 ** attempt
+
+                print(
+                    f"Retrying in "
+                    f"{wait_time} seconds..."
+                )
+
+                time.sleep(wait_time)
+
+                continue
+
+            # Model/key errors shouldn't be retried.
+            if "404" in error_text:
+
+                return (
+                    "The Gemini model is not available "
+                    "for this API key."
+                )
+
+            if "401" in error_text:
+
+                return (
+                    "The Gemini API key was rejected."
+                )
+
+            if "403" in error_text:
+
+                return (
+                    "Gemini access was denied for this API key."
+                )
+
+            break
+
+    return (
+        "Gemini is temporarily unavailable. "
+        "Please try again."
+    )
+
+
+# ============================================================
+# TIME
+# ============================================================
+
+def get_time():
+
+    now = datetime.datetime.now()
+
+    return now.strftime("%I:%M %p")
+
+
+def time_command():
+
+    return (
+        f"The time is {get_time()}."
+    )
+
+
+# ============================================================
+# DATE
+# ============================================================
+
+def date_command():
+
+    now = datetime.datetime.now()
+
+    return (
+        "Today is "
+        + now.strftime("%A, %d %B %Y")
+        + "."
+    )
+
+
+# ============================================================
+# SYSTEM STATUS
+# ============================================================
+
+def system_status():
+
+    cpu = psutil.cpu_percent(
+        interval=0.2
+    )
+
+    memory = psutil.virtual_memory()
+
+    disk = psutil.disk_usage("C:\\")
+
+    result = []
+
+    result.append(
+        f"CPU usage is {cpu:.0f}%."
+    )
+
+    result.append(
+        f"Memory usage is {memory.percent:.0f}%."
+    )
+
+    result.append(
+        f"C drive usage is {disk.percent:.0f}%."
+    )
+
+    battery = psutil.sensors_battery()
+
+    if battery:
+
+        state = (
+            "charging"
+            if battery.power_plugged
+            else "not charging"
         )
 
-        return None
+        result.append(
+            f"Battery is {battery.percent:.0f}% "
+            f"and {state}."
+        )
 
-    except Exception as e:
-
-        print("Speech recognition error:", e)
-
-        return None
-
-
-# ============================================================
-# WHATSAPP
-# ============================================================
-
-def open_whatsapp():
-
-    print("Attempting to open WhatsApp...")
-
-    # First try the Windows WhatsApp protocol.
-    try:
-
-        os.startfile("whatsapp:")
-
-        speak("Opening WhatsApp.")
-
-        return True
-
-    except Exception as e:
-
-        print("WhatsApp desktop launch failed:", e)
-
-    # If the desktop app isn't available,
-    # open WhatsApp Web instead.
-
-    try:
-
-        webbrowser.open("https://web.whatsapp.com")
-
-        speak("Opening WhatsApp Web.")
-
-        return True
-
-    except Exception as e:
-
-        print("WhatsApp Web launch failed:", e)
-
-        speak("I couldn't open WhatsApp.")
-
-        return True
+    return " ".join(result)
 
 
 # ============================================================
-# APPLICATION LAUNCHER
+# OPEN APPLICATION
 # ============================================================
 
-def open_application(app):
+def open_app(app):
 
-    applications = {
+    app = app.lower().strip()
 
-        "brave": [
+    # --------------------------------------------------------
+    # WHATSAPP
+    # --------------------------------------------------------
+
+    if "whatsapp" in app:
+
+        try:
+
+            os.startfile("whatsapp:")
+
+            return "Opening WhatsApp."
+
+        except Exception:
+
+            webbrowser.open(
+                "https://web.whatsapp.com"
+            )
+
+            return "Opening WhatsApp Web."
+
+    # --------------------------------------------------------
+    # SPOTIFY
+    # --------------------------------------------------------
+
+    if "spotify" in app:
+
+        try:
+
+            os.startfile("spotify:")
+
+            return "Opening Spotify."
+
+        except Exception:
+
+            webbrowser.open(
+                "https://open.spotify.com"
+            )
+
+            return "Opening Spotify in the browser."
+
+    # --------------------------------------------------------
+    # CHROME
+    # --------------------------------------------------------
+
+    if app in [
+        "chrome",
+        "google chrome",
+    ]:
+
+        chrome_paths = [
+
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+
+        ]
+
+        for path in chrome_paths:
+
+            if os.path.exists(path):
+
+                subprocess.Popen(
+                    [path]
+                )
+
+                return "Opening Chrome."
+
+        try:
+
+            subprocess.Popen(
+                ["chrome"]
+            )
+
+            return "Opening Chrome."
+
+        except Exception:
+
+            return "I couldn't find Chrome."
+
+    # --------------------------------------------------------
+    # BRAVE
+    # --------------------------------------------------------
+
+    if app == "brave":
+
+        brave_paths = [
+
             r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe",
-            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe"
-        ],
+
+            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe",
+
+        ]
+
+        for path in brave_paths:
+
+            if os.path.exists(path):
+
+                subprocess.Popen(
+                    [path]
+                )
+
+                return "Opening Brave."
+
+        try:
+
+            subprocess.Popen(
+                ["brave"]
+            )
+
+            return "Opening Brave."
+
+        except Exception:
+
+            return "I couldn't find Brave."
+
+    # --------------------------------------------------------
+    # VS CODE
+    # --------------------------------------------------------
+
+    if app in [
+        "vs code",
+        "visual studio code",
+        "vscode",
+    ]:
+
+        try:
+
+            subprocess.Popen(
+                ["code"]
+            )
+
+            return "Opening Visual Studio Code."
+
+        except Exception:
+
+            return (
+                "I couldn't find "
+                "Visual Studio Code."
+            )
+
+    # --------------------------------------------------------
+    # NOTEPAD
+    # --------------------------------------------------------
+
+    if app == "notepad":
+
+        subprocess.Popen(
+            ["notepad.exe"]
+        )
+
+        return "Opening Notepad."
+
+    # --------------------------------------------------------
+    # CALCULATOR
+    # --------------------------------------------------------
+
+    if app in [
+        "calculator",
+        "calc",
+    ]:
+
+        subprocess.Popen(
+            ["calc.exe"]
+        )
+
+        return "Opening Calculator."
+
+    # --------------------------------------------------------
+    # FILE EXPLORER
+    # --------------------------------------------------------
+
+    if app in [
+        "explorer",
+        "file explorer",
+    ]:
+
+        subprocess.Popen(
+            ["explorer.exe"]
+        )
+
+        return "Opening File Explorer."
+
+    return None
+
+
+# ============================================================
+# CLOSE APPLICATION
+# ============================================================
+
+def close_app(app):
+
+    app = app.lower().strip()
+
+    processes = {
 
         "chrome": [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+            "chrome.exe"
+        ],
+
+        "google chrome": [
+            "chrome.exe"
+        ],
+
+        "brave": [
+            "brave.exe"
+        ],
+
+        "spotify": [
+            "spotify.exe"
+        ],
+
+        "whatsapp": [
+            "WhatsApp.exe",
+            "WhatsAppHost.exe"
+        ],
+
+        "vs code": [
+            "Code.exe"
+        ],
+
+        "visual studio code": [
+            "Code.exe"
         ],
 
         "vscode": [
-            os.path.expandvars(
-                r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe"
-            )
+            "Code.exe"
         ],
 
         "notepad": [
             "notepad.exe"
         ],
-
-        "calculator": [
-            "calc.exe"
-        ],
-
-        "explorer": [
-            "explorer.exe"
-        ]
     }
 
+    if app not in processes:
 
-    if app == "whatsapp":
+        return (
+            f"I don't have a close command "
+            f"for {app}."
+        )
 
-        return open_whatsapp()
+    closed = False
 
-
-    if app not in applications:
-
-        return False
-
-
-    possible_paths = applications[app]
-
-
-    # Find a valid application path.
-
-    for path in possible_paths:
-
-        if (
-            path.endswith(".exe")
-            and not os.path.isabs(path)
-        ):
-
-            # Windows system commands such as notepad.exe
-            # can be launched directly.
-
-            try:
-
-                subprocess.Popen(path)
-
-                speak(f"Opening {app}.")
-
-                return True
-
-            except Exception:
-
-                continue
-
-
-        if os.path.exists(path):
-
-            try:
-
-                subprocess.Popen(path)
-
-                speak(f"Opening {app}.")
-
-                return True
-
-            except Exception as e:
-
-                print("Launch error:", e)
-
-
-    # Special fallback for Windows commands.
-
-    if app == "notepad":
+    for process in processes[app]:
 
         try:
 
-            subprocess.Popen("notepad.exe")
+            result = subprocess.run(
 
-            speak("Opening Notepad.")
+                [
+                    "taskkill",
+                    "/IM",
+                    process,
+                    "/F",
+                ],
 
-            return True
+                capture_output=True,
+                text=True,
+            )
 
-        except Exception:
-            pass
+            if result.returncode == 0:
 
-
-    if app == "calculator":
-
-        try:
-
-            subprocess.Popen("calc.exe")
-
-            speak("Opening Calculator.")
-
-            return True
+                closed = True
 
         except Exception:
+
             pass
 
+    if closed:
 
-    if app == "explorer":
+        return f"Closing {app}."
 
-        try:
-
-            subprocess.Popen("explorer.exe")
-
-            speak("Opening File Explorer.")
-
-            return True
-
-        except Exception:
-            pass
-
-
-    speak(f"I couldn't find {app} on this PC.")
-
-    return True
+    return (
+        f"{app} doesn't appear "
+        f"to be running."
+    )
 
 
 # ============================================================
-# FOLDER LAUNCHER
+# FOLDERS
 # ============================================================
 
 def open_folder(folder):
 
+    home = Path.home()
+
     folders = {
 
         "downloads":
-            os.path.expandvars(
-                r"%USERPROFILE%\Downloads"
-            ),
+            home / "Downloads",
+
+        "download":
+            home / "Downloads",
 
         "documents":
-            os.path.expandvars(
-                r"%USERPROFILE%\Documents"
-            ),
+            home / "Documents",
+
+        "document":
+            home / "Documents",
 
         "desktop":
-            os.path.expandvars(
-                r"%USERPROFILE%\Desktop"
-            ),
+            home / "Desktop",
 
         "pictures":
-            os.path.expandvars(
-                r"%USERPROFILE%\Pictures"
-            ),
+            home / "Pictures",
+
+        "photos":
+            home / "Pictures",
 
         "music":
-            os.path.expandvars(
-                r"%USERPROFILE%\Music"
-            ),
+            home / "Music",
 
         "videos":
-            os.path.expandvars(
-                r"%USERPROFILE%\Videos"
-            )
+            home / "Videos",
+
     }
 
+    folder = folder.lower().strip()
 
     if folder not in folders:
 
-        return False
-
-
-    path = folders[folder]
-
+        return None
 
     try:
 
-        os.startfile(path)
+        os.startfile(
+            str(folders[folder])
+        )
 
-        speak(f"Opening {folder}.")
+        return (
+            f"Opening {folder}."
+        )
 
-        return True
+    except Exception:
 
-    except Exception as e:
-
-        print("Folder error:", e)
-
-        speak(f"I couldn't open {folder}.")
-
-        return True
+        return (
+            f"I couldn't open {folder}."
+        )
 
 
 # ============================================================
@@ -428,108 +697,52 @@ def take_screenshot():
 
         from PIL import ImageGrab
 
-        screenshots_folder = os.path.expandvars(
-            r"%USERPROFILE%\Pictures\Jarvis Screenshots"
+        folder = (
+            Path.home()
+            / "Pictures"
+            / "Jarvis Screenshots"
         )
 
-        os.makedirs(
-            screenshots_folder,
+        folder.mkdir(
+            parents=True,
             exist_ok=True
         )
-
 
         timestamp = datetime.datetime.now().strftime(
             "%Y-%m-%d_%H-%M-%S"
         )
 
-
-        filename = os.path.join(
-            screenshots_folder,
-            f"screenshot_{timestamp}.png"
+        path = (
+            folder
+            / f"jarvis_{timestamp}.png"
         )
-
 
         image = ImageGrab.grab()
 
-        image.save(filename)
+        image.save(path)
 
-
-        print(f"Screenshot saved to:\n{filename}")
-
-        speak("Screenshot captured.")
-
-    except Exception as e:
-
-        print("Screenshot error:", e)
-
-        speak("I couldn't capture the screenshot.")
-
-
-# ============================================================
-# SYSTEM INFORMATION
-# ============================================================
-
-def system_info():
-
-    try:
-
-        import psutil
-
-        cpu = psutil.cpu_percent(
-            interval=1
+        return (
+            "Screenshot captured. "
+            f"Saved to {path}"
         )
 
-        ram = psutil.virtual_memory().percent
+    except Exception as error:
 
-        speak(
-            f"CPU usage is {cpu:.0f} percent. "
-            f"Memory usage is {ram:.0f} percent."
-        )
+        print(error)
 
-    except Exception as e:
-
-        print("System information error:", e)
-
-        speak(
-            "I couldn't retrieve system information."
+        return (
+            "I couldn't take "
+            "the screenshot."
         )
 
 
 # ============================================================
-# TIME
+# WEBSITE
 # ============================================================
 
-def tell_time():
+def open_website(site):
 
-    current_time = datetime.datetime.now().strftime(
-        "%I:%M %p"
-    )
-
-    speak(
-        f"The current time is {current_time}."
-    )
-
-
-# ============================================================
-# DATE
-# ============================================================
-
-def tell_date():
-
-    current_date = datetime.datetime.now().strftime(
-        "%A, %d %B %Y"
-    )
-
-    speak(
-        f"Today is {current_date}."
-    )
-
-
-# ============================================================
-# OPEN WEBSITE
-# ============================================================
-
-def open_website(command):
+    site = site.lower().strip()
 
     websites = {
 
@@ -542,286 +755,493 @@ def open_website(command):
         "gmail":
             "https://mail.google.com",
 
-        "instagram":
-            "https://www.instagram.com",
-
         "github":
             "https://github.com",
 
-        "whatsapp web":
-            "https://web.whatsapp.com"
+        "instagram":
+            "https://www.instagram.com",
+
+        "linkedin":
+            "https://www.linkedin.com",
+
+        "chatgpt":
+            "https://chatgpt.com",
+
+        "gemini":
+            "https://gemini.google.com",
+
     }
 
+    if site not in websites:
 
-    for name, url in websites.items():
+        return None
 
-        if f"open {name}" in command:
+    webbrowser.open(
+        websites[site]
+    )
 
-            try:
-
-                webbrowser.open(url)
-
-                speak(f"Opening {name}.")
-
-                return True
-
-            except Exception:
-
-                speak(f"I couldn't open {name}.")
-
-                return True
-
-
-    return False
+    return (
+        f"Opening {site}."
+    )
 
 
 # ============================================================
-# SEARCH WEB
+# GOOGLE SEARCH
 # ============================================================
 
-def search_web(command):
+def google_search(query):
 
-    prefixes = [
-        "search for ",
-        "search ",
-        "google ",
-        "look up "
-    ]
+    query = query.strip()
 
+    if not query:
 
-    for prefix in prefixes:
+        return (
+            "Tell me what you "
+            "want me to search for."
+        )
 
-        if command.startswith(prefix):
+    url = (
+        "https://www.google.com/search?q="
+        + query.replace(" ", "+")
+    )
 
-            query = command[len(prefix):].strip()
+    webbrowser.open(url)
 
-            if not query:
-                return True
-
-
-            url = (
-                "https://www.google.com/search?q="
-                + query.replace(" ", "+")
-            )
-
-
-            try:
-
-                webbrowser.open(url)
-
-                speak(
-                    f"Searching the web for {query}."
-                )
-
-            except Exception:
-
-                speak("I couldn't perform the search.")
-
-
-            return True
-
-
-    return False
+    return (
+        f"Searching Google for "
+        f"{query}."
+    )
 
 
 # ============================================================
-# HANDLE PC COMMANDS
+# HELP
 # ============================================================
 
-def handle_command(command):
+def show_help():
+
+    print()
+    print("=" * 65)
+    print("                    JARVIS COMMANDS")
+    print("=" * 65)
+
+    print()
+    print("SYSTEM")
+    print("  what time is it")
+    print("  state time")
+    print("  what is today's date")
+    print("  system status")
+    print("  take screenshot")
+
+    print()
+    print("APPS")
+    print("  open chrome")
+    print("  open brave")
+    print("  open spotify")
+    print("  open whatsapp")
+    print("  open vscode")
+    print("  open notepad")
+    print("  open calculator")
+
+    print()
+    print("FOLDERS")
+    print("  open downloads")
+    print("  open documents")
+    print("  open desktop")
+    print("  open pictures")
+    print("  open music")
+    print("  open videos")
+
+    print()
+    print("WEB")
+    print("  search for artificial intelligence")
+    print("  open youtube")
+    print("  open github")
+
+    print()
+    print("AI")
+    print("  who is Hardik Pandya?")
+    print("  explain quantum computing")
+    print("  write a C program")
+
+    print()
+    print("PROGRAM")
+    print("  clear")
+    print("  exit")
+
+    print()
+    print("=" * 65)
+    print()
+
+
+# ============================================================
+# LOCAL COMMAND PROCESSOR
+# ============================================================
+
+def process_command(command):
+
+    if not command:
+
+        return True
+
+    lower = command.lower().strip()
 
     # --------------------------------------------------------
     # EXIT
     # --------------------------------------------------------
 
-    if command in [
+    if lower in [
+
         "exit",
         "quit",
-        "shutdown jarvis",
+        "goodbye",
         "goodbye jarvis",
-        "go offline"
+        "exit jarvis",
+        "quit jarvis",
+        "stop jarvis",
+
     ]:
 
-        speak(
-            "Shutting down. Goodbye."
+        print()
+        print(
+            "JARVIS: Going offline."
         )
 
-        sys.exit()
+        return False
 
+    # --------------------------------------------------------
+    # HELP
+    # --------------------------------------------------------
+
+    if lower == "help":
+
+        show_help()
+
+        return True
+
+    # --------------------------------------------------------
+    # CLEAR
+    # --------------------------------------------------------
+
+    if lower == "clear":
+
+        os.system("cls")
+
+        print(
+            "JARVIS v0.6"
+        )
+
+        print()
+
+        return True
+
+    # --------------------------------------------------------
+    # GREETING
+    # --------------------------------------------------------
+
+    if lower in [
+
+        "hello",
+        "hi",
+        "hey",
+        "hello jarvis",
+        "hi jarvis",
+        "hey jarvis",
+
+    ]:
+
+        print()
+        print(
+            "JARVIS: Hello. "
+            "How can I help?"
+        )
+
+        return True
 
     # --------------------------------------------------------
     # TIME
     # --------------------------------------------------------
 
-    if (
-        "what time is it" in command
-        or "current time" in command
-        or command == "time"
-    ):
+    time_commands = [
 
-        tell_time()
+        "time",
+        "time please",
+        "tell time",
+        "state time",
+        "what time",
+        "what time is it",
+        "what time is it now",
+        "what is the time",
+        "tell me the time",
+        "current time",
+
+    ]
+
+    if lower in time_commands:
+
+        print()
+        print(
+            "JARVIS:",
+            time_command()
+        )
 
         return True
-
 
     # --------------------------------------------------------
     # DATE
     # --------------------------------------------------------
 
-    if (
-        "what date is it" in command
-        or "today's date" in command
-        or "todays date" in command
-        or command == "date"
-    ):
+    date_commands = [
 
-        tell_date()
+        "date",
+        "today date",
+        "today's date",
+        "current date",
+        "what is the date",
+        "what is today's date",
+        "tell me the date",
+
+    ]
+
+    if lower in date_commands:
+
+        print()
+        print(
+            "JARVIS:",
+            date_command()
+        )
 
         return True
 
+    # --------------------------------------------------------
+    # SYSTEM STATUS
+    # --------------------------------------------------------
+
+    if lower in [
+
+        "system status",
+        "pc status",
+        "computer status",
+        "system information",
+        "computer information",
+        "how is my computer",
+
+    ]:
+
+        print()
+        print(
+            "JARVIS:",
+            system_status()
+        )
+
+        return True
 
     # --------------------------------------------------------
     # SCREENSHOT
     # --------------------------------------------------------
 
-    if (
-        "take a screenshot" in command
-        or "take screenshot" in command
-        or "capture my screen" in command
-    ):
+    if lower in [
 
-        take_screenshot()
+        "take screenshot",
+        "take a screenshot",
+        "capture screen",
+        "capture screenshot",
 
-        return True
+    ]:
 
-
-    # --------------------------------------------------------
-    # SYSTEM INFORMATION
-    # --------------------------------------------------------
-
-    if (
-        "cpu usage" in command
-        or "ram usage" in command
-        or "memory usage" in command
-        or "system usage" in command
-    ):
-
-        system_info()
+        print()
+        print(
+            "JARVIS:",
+            take_screenshot()
+        )
 
         return True
 
+    # --------------------------------------------------------
+    # FOLDER
+    # --------------------------------------------------------
+
+    folder_match = re.match(
+
+        r"^(open|launch|start)\s+"
+        r"(downloads?|documents?|desktop|"
+        r"pictures?|photos?|music|videos?)$",
+
+        lower,
+    )
+
+    if folder_match:
+
+        result = open_folder(
+            folder_match.group(2)
+        )
+
+        if result:
+
+            print()
+            print(
+                "JARVIS:",
+                result
+            )
+
+            return True
 
     # --------------------------------------------------------
-    # WEBSITE
+    # OPEN
     # --------------------------------------------------------
 
-    if open_website(command):
+    open_match = re.match(
+
+        r"^(open|launch|start)\s+(.+)$",
+
+        lower,
+    )
+
+    if open_match:
+
+        target = (
+            open_match
+            .group(2)
+            .strip()
+        )
+
+        # Website
+
+        result = open_website(
+            target
+        )
+
+        if result:
+
+            print()
+            print(
+                "JARVIS:",
+                result
+            )
+
+            return True
+
+        # Application
+
+        result = open_app(
+            target
+        )
+
+        if result:
+
+            print()
+            print(
+                "JARVIS:",
+                result
+            )
+
+            return True
+
+    # --------------------------------------------------------
+    # CLOSE
+    # --------------------------------------------------------
+
+    close_match = re.match(
+
+        r"^(close|quit|exit)\s+(.+)$",
+
+        lower,
+    )
+
+    if close_match:
+
+        target = (
+            close_match
+            .group(2)
+            .strip()
+        )
+
+        result = close_app(
+            target
+        )
+
+        print()
+        print(
+            "JARVIS:",
+            result
+        )
 
         return True
 
-
     # --------------------------------------------------------
-    # WEB SEARCH
+    # SEARCH
     # --------------------------------------------------------
 
-    if search_web(command):
+    search_match = re.match(
+
+        r"^(search for|google|look up)\s+(.+)$",
+
+        lower,
+    )
+
+    if search_match:
+
+        query = (
+            search_match
+            .group(2)
+        )
+
+        print()
+        print(
+            "JARVIS:",
+            google_search(query)
+        )
 
         return True
 
-
     # --------------------------------------------------------
-    # APPLICATIONS
+    # EVERYTHING ELSE
     # --------------------------------------------------------
+    # Send to Gemini.
 
-    applications = [
-        "whatsapp",
-        "brave",
-        "chrome",
-        "vscode",
-        "notepad",
-        "calculator",
-        "explorer"
-    ]
+    answer = ask_gemini(
+        command
+    )
 
+    print()
+    print("JARVIS:")
+    print(answer)
+    print()
 
-    for app in applications:
-
-        if (
-            f"open {app}" in command
-            or f"launch {app}" in command
-            or f"start {app}" in command
-        ):
-
-            return open_application(app)
-
-
-    # --------------------------------------------------------
-    # FOLDERS
-    # --------------------------------------------------------
-
-    folders = [
-        "downloads",
-        "documents",
-        "desktop",
-        "pictures",
-        "music",
-        "videos"
-    ]
-
-
-    for folder in folders:
-
-        if (
-            f"open {folder}" in command
-            or f"open my {folder}" in command
-        ):
-
-            return open_folder(folder)
-
-
-    return False
+    return True
 
 
 # ============================================================
-# LOCAL AI BRAIN
+# STARTUP
 # ============================================================
 
-conversation = [
-    {
-        "role": "system",
-        "content": SYSTEM_PROMPT
-    }
-]
+def print_banner():
 
+    print()
+    print("=" * 65)
+    print("                    J A R V I S")
+    print("                         v0.6")
+    print("=" * 65)
 
-def ask_jarvis(message):
+    print()
+    print("AI         :", MODEL)
+    print("Thinking   :", THINKING_LEVEL)
+    print("Interface  : TEXT")
+    print("Microphone : OFF")
+    print("Ollama     : OFF")
+    print("Status     : ONLINE")
 
-    conversation.append(
-        {
-            "role": "user",
-            "content": message
-        }
+    print()
+    print(
+        "Type 'help' for commands."
     )
 
-
-    response = ollama.chat(
-        model=MODEL,
-        messages=conversation
+    print(
+        "Type 'exit' to shut down JARVIS."
     )
 
-
-    reply = response["message"]["content"]
-
-
-    conversation.append(
-        {
-            "role": "assistant",
-            "content": reply
-        }
-    )
-
-
-    return reply
+    print()
+    print("=" * 65)
+    print()
 
 
 # ============================================================
@@ -830,109 +1250,61 @@ def ask_jarvis(message):
 
 def main():
 
-    print()
-    print("=" * 60)
-    print("                 J.A.R.V.I.S. v0.3")
-    print("              LOCAL AI PC ASSISTANT")
-    print("=" * 60)
-    print()
-    print(f"AI Model : {MODEL}")
-    print(f"Mic ID   : {MIC_ID}")
-    print()
-    print("Available commands:")
-    print("  • Open WhatsApp")
-    print("  • Open Brave")
-    print("  • Open Chrome")
-    print("  • Open VS Code")
-    print("  • Open Downloads")
-    print("  • Take a screenshot")
-    print("  • What time is it?")
-    print("  • What is my CPU usage?")
-    print("  • Search for something")
-    print("  • Normal questions → Local Qwen AI")
-    print("  • Goodbye Jarvis")
-    print()
+    print_banner()
 
-
-    # Initialize microphone once.
-    microphone = initialize_microphone()
-
-
-    if microphone is None:
-
-        print()
-        print("ERROR: Microphone could not be initialized.")
-        print("Check the microphone settings and try again.")
-        return
-
-
-    speak(
-        "Good evening. JARVIS is online."
+    print(
+        "JARVIS: All systems online."
     )
 
+    print(
+        "JARVIS: Text interface ready."
+    )
+
+    print()
 
     while True:
 
-        command = listen(microphone)
-
-
-        if not command:
-
-            continue
-
-
-        # ----------------------------------------------------
-        # Remove JARVIS prefix
-        # ----------------------------------------------------
-
-        if command.startswith("jarvis"):
-
-            command = command[
-                len("jarvis"):
-            ].strip(" ,")
-
-
-        # ----------------------------------------------------
-        # Ignore empty commands
-        # ----------------------------------------------------
-
-        if not command:
-
-            continue
-
-
-        # ----------------------------------------------------
-        # Execute computer commands
-        # ----------------------------------------------------
-
-        if handle_command(command):
-
-            continue
-
-
-        # ----------------------------------------------------
-        # Otherwise use local AI
-        # ----------------------------------------------------
-
         try:
 
-            reply = ask_jarvis(command)
+            command = input(
+                "You: "
+            )
 
-            speak(reply)
+            if not process_command(
+                command
+            ):
 
-        except Exception as e:
+                break
+
+        except KeyboardInterrupt:
 
             print()
-            print("AI ERROR:", e)
-
-            speak(
-                "I encountered an error "
-                "while processing that request."
+            print()
+            print(
+                "JARVIS: Going offline."
             )
+
+            break
+
+        except EOFError:
+
+            print()
+            break
+
+        except Exception as error:
+
+            print()
+            print(
+                "Unexpected error:"
+            )
+
+            print(error)
+
+            print()
 
 
 # ============================================================
-# PROGRAM START
+# RUN
 # ============================================================
 
 if __name__ == "__main__":
